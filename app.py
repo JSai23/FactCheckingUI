@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import pytz
 from supabase import create_client
 import json
+from st_aggrid import AgGrid, GridOptionsBuilder
 
 # Initialize Supabase client
 supabase_url = st.secrets["supabase_url"]
@@ -77,27 +78,43 @@ with tab1:
     else:
         display_posts = filtered_posts_df
     
-    # Pagination
-    items_per_page = 50
-    total_items = len(display_posts)
-    total_pages = (total_items - 1) // items_per_page + 1
+    # Add reviewed column
+    display_posts = display_posts.copy()
     
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        current_page = st.number_input("Page", min_value=1, max_value=max(1, total_pages), value=1, key="page_number")
+    # Configure grid for posts
+    gb = GridOptionsBuilder.from_dataframe(display_posts)
     
-    start_idx = (current_page - 1) * items_per_page
-    end_idx = min(start_idx + items_per_page, total_items)
+    # Configure selection
+    gb.configure_selection(selection_mode='multiple', use_checkbox=True)
     
-    # Display page info
-    st.write(f"Showing {start_idx + 1} to {end_idx} of {total_items} posts")
+    # Configure columns
+    gb.configure_column('post_id', header_name='Post ID')
+    gb.configure_column('user_name', header_name='User')
+    gb.configure_column('date', header_name='Date')
+    gb.configure_column('text', header_name='Content')
+    gb.configure_column('favorites', header_name='Favorites')
+    gb.configure_column('retweets', header_name='Retweets')
+    gb.configure_default_column(resizable=True, filterable=True)
     
-    # Display posts for current page with scrolling
-    st.dataframe(
-        display_posts.iloc[start_idx:end_idx],
-        use_container_width=True,
-        height=500  # Set a fixed height for vertical scrolling
+    grid_options = gb.build()
+    
+    grid_response = AgGrid(
+        display_posts,
+        gridOptions=grid_options,
+        height=600,
+        width='100%',
+        data_return_mode='AS_INPUT',
+        update_mode='MODEL_CHANGED'
     )
+    
+    # Submit button for reviews
+    if st.button("Submit Reviews", key="submit_reviews"):
+        selected_df = pd.DataFrame(grid_response['selected_rows'])
+        if not selected_df.empty:
+            selected_post_ids = selected_df['post_id'].astype(str).tolist()
+            st.success(f"Submitted {len(selected_post_ids)} reviews for posts: {', '.join(selected_post_ids)}")
+        else:
+            st.warning("No posts selected for review")
 
 # Tab 2: Cluster Based Fact Checking
 with tab2:
@@ -106,6 +123,9 @@ with tab2:
     # Get clustered claims data
     claims_response = supabase.table('clustered_claims').select('*').execute()
     claims_df = pd.DataFrame(claims_response.data)
+    
+    # Dictionary to store helpful states
+    helpful_states = {}
     
     # Update cluster metrics based on filtered data
     for _, cluster in clusters_df.iterrows():
@@ -124,6 +144,9 @@ with tab2:
         }.get(priority_level, '⚪')
         
         with st.expander(f"{priority_color} {cluster['cluster_name'].replace('_', ' ').title()} (Priority: {priority_level})"):
+            # Add helpful checkbox at the top
+            helpful_states[cluster['cluster_name']] = st.checkbox("Mark as Helpful", key=f"helpful_{cluster['cluster_name']}")
+            
             # Create two columns for the layout
             col_left, col_right = st.columns([2, 1])
             
@@ -212,4 +235,12 @@ with tab2:
                         height=400
                     )
                 else:
-                    st.markdown("No claims available for this cluster") 
+                    st.markdown("No claims available for this cluster")
+    
+    # Submit button for helpful states
+    if st.button("Submit Cluster Feedback", key="submit_helpful"):
+        helpful_clusters = [cluster_name for cluster_name, is_helpful in helpful_states.items() if is_helpful]
+        if helpful_clusters:
+            st.success(f"Submitted feedback for {len(helpful_clusters)} clusters: {', '.join(helpful_clusters)}")
+        else:
+            st.warning("No clusters marked as helpful") 
