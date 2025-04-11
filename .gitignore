@@ -1,3 +1,5 @@
 ./venv/
 venv/
 venv
+.streamlit/secrets.toml
+.cursor/mcp.json
