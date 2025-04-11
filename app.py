@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import pytz
 from supabase import create_client
 import json
-from st_aggrid import AgGrid, GridOptionsBuilder
+from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
 # Initialize Supabase client
 supabase_url = st.secrets["supabase_url"]
@@ -38,6 +38,10 @@ posts_df, clusters_df = load_data()
 # Title
 st.title("🔍 Fact Checking Dashboard")
 
+# User ID input in sidebar
+st.sidebar.header("User Information")
+user_id = st.sidebar.text_input("Enter User ID:", key="user_id")
+
 # Date filter in sidebar
 st.sidebar.header("Time Range Filter")
 time_filter = st.sidebar.radio(
@@ -62,6 +66,41 @@ else:  # All Time
 # Apply date filter to posts
 filtered_posts_df = posts_df[posts_df['timestamp'] >= date_threshold]
 
+# Function to get existing user feedback
+def get_user_feedback(user_id):
+    if not user_id:
+        return [], []
+    response = supabase.table('user_feedback').select('*').eq('user_id', user_id).execute()
+    if response.data:
+        return response.data[0].get('posts_reviewed', []), response.data[0].get('clusters_helpful', [])
+    return [], []
+
+# Function to update user feedback
+def update_user_feedback(user_id, posts_reviewed=None, clusters_helpful=None):
+    if not user_id:
+        return
+    
+    # Get existing feedback
+    current_posts, current_clusters = get_user_feedback(user_id)
+    
+    # Update arrays with new values
+    if posts_reviewed is not None:
+        current_posts = list(set(current_posts + posts_reviewed))
+    if clusters_helpful is not None:
+        current_clusters = list(set(current_clusters + clusters_helpful))
+    
+    # Upsert the feedback
+    data = {
+        'user_id': user_id,
+        'posts_reviewed': current_posts,
+        'clusters_helpful': current_clusters
+    }
+    
+    supabase.table('user_feedback').upsert(data).execute()
+
+# Get existing feedback if user_id is provided
+reviewed_posts, helpful_clusters = get_user_feedback(user_id)
+
 # Create tabs
 tab1, tab2 = st.tabs(["Simple Fact Checking", "Cluster Based Fact Checking"])
 
@@ -78,8 +117,9 @@ with tab1:
     else:
         display_posts = filtered_posts_df
     
-    # Add reviewed column
+    # Add reviewed column and mark previously reviewed posts
     display_posts = display_posts.copy()
+    display_posts['reviewed'] = display_posts['post_id'].astype(str).isin(reviewed_posts if reviewed_posts else [])
     
     # Configure grid for posts
     gb = GridOptionsBuilder.from_dataframe(display_posts)
@@ -88,6 +128,7 @@ with tab1:
     gb.configure_selection(selection_mode='multiple', use_checkbox=True)
     
     # Configure columns
+    gb.configure_column('reviewed', hide=True)
     gb.configure_column('post_id', header_name='Post ID')
     gb.configure_column('user_name', header_name='User')
     gb.configure_column('date', header_name='Date')
@@ -96,6 +137,35 @@ with tab1:
     gb.configure_column('retweets', header_name='Retweets')
     gb.configure_default_column(resizable=True, filterable=True)
     
+    js = JsCode("""
+    function(params) {
+        if (params.data.reviewed) {
+            return 'reviewed-row';
+        }
+        return '';
+    }
+    """)
+    
+    js_selectable = JsCode("""
+    function(params) {
+        return !params.data.reviewed;
+    }
+    """)
+    
+    # Add custom grid options
+    gb.configure_grid_options(
+        getRowClass=js,
+        isRowSelectable=js_selectable
+    )
+    
+    css = {
+        ".reviewed-row": {
+            "background-color": "#808080 !important",
+            "pointer-events": "none",
+            "color": "white !important"
+        }
+    }
+    
     grid_options = gb.build()
     
     grid_response = AgGrid(
@@ -103,8 +173,10 @@ with tab1:
         gridOptions=grid_options,
         height=600,
         width='100%',
+        custom_css=css,
         data_return_mode='AS_INPUT',
-        update_mode='MODEL_CHANGED'
+        update_mode='MODEL_CHANGED',
+        allow_unsafe_jscode=True
     )
     
     # Submit button for reviews
@@ -112,7 +184,11 @@ with tab1:
         selected_df = pd.DataFrame(grid_response['selected_rows'])
         if not selected_df.empty:
             selected_post_ids = selected_df['post_id'].astype(str).tolist()
-            st.success(f"Submitted {len(selected_post_ids)} reviews for posts: {', '.join(selected_post_ids)}")
+            if user_id:
+                update_user_feedback(user_id, posts_reviewed=selected_post_ids)
+                st.success(f"Submitted {len(selected_post_ids)} reviews for posts: {', '.join(selected_post_ids)}")
+            else:
+                st.warning("Please enter a User ID to submit feedback")
         else:
             st.warning("No posts selected for review")
 
@@ -144,8 +220,14 @@ with tab2:
         }.get(priority_level, '⚪')
         
         with st.expander(f"{priority_color} {cluster['cluster_name'].replace('_', ' ').title()} (Priority: {priority_level})"):
-            # Add helpful checkbox at the top
-            helpful_states[cluster['cluster_name']] = st.checkbox("Mark as Helpful", key=f"helpful_{cluster['cluster_name']}")
+            # Add helpful checkbox at the top with pre-selected state
+            is_helpful = cluster['cluster_name'] in helpful_clusters if helpful_clusters else False
+            helpful_states[cluster['cluster_name']] = st.checkbox(
+                "Mark as Helpful",
+                value=is_helpful,
+                disabled=is_helpful,
+                key=f"helpful_{cluster['cluster_name']}"
+            )
             
             # Create two columns for the layout
             col_left, col_right = st.columns([2, 1])
@@ -241,6 +323,10 @@ with tab2:
     if st.button("Submit Cluster Feedback", key="submit_helpful"):
         helpful_clusters = [cluster_name for cluster_name, is_helpful in helpful_states.items() if is_helpful]
         if helpful_clusters:
-            st.success(f"Submitted feedback for {len(helpful_clusters)} clusters: {', '.join(helpful_clusters)}")
+            if user_id:
+                update_user_feedback(user_id, clusters_helpful=helpful_clusters)
+                st.success(f"Submitted feedback for {len(helpful_clusters)} clusters: {', '.join(helpful_clusters)}")
+            else:
+                st.warning("Please enter a User ID to submit feedback")
         else:
             st.warning("No clusters marked as helpful") 
