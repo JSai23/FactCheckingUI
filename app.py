@@ -5,6 +5,7 @@ import pytz
 from supabase import create_client
 import json
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
+from parsers import parse_display_output
 
 # Initialize Supabase client
 supabase_url = st.secrets["supabase_url"]
@@ -13,320 +14,159 @@ supabase = create_client(supabase_url, supabase_key)
 
 # Set page config
 st.set_page_config(
-    page_title="Fact Checking Dashboard",
+    page_title="ClaimFinder",
     page_icon="🔍",
     layout="wide"
 )
 
-# Load data from Supabase
-@st.cache_data
-def load_data():
-    # Load posts with cluster information
-    posts_response = supabase.table('posts').select('*').execute()
-    posts_df = pd.DataFrame(posts_response.data)
-    
-    clusters_response = supabase.table('cluster_presentations').select('*').execute()
-    clusters_df = pd.DataFrame(clusters_response.data)
-    
-    # Convert timestamp strings to datetime objects with UTC timezone
-    posts_df['timestamp'] = pd.to_datetime(posts_df['date']).dt.tz_convert('UTC')
-    
-    return posts_df, clusters_df
+# Session state initialization
+if 'logged_in' not in st.session_state:
+    st.session_state.logged_in = False
+if 'username' not in st.session_state:
+    st.session_state.username = None
 
-posts_df, clusters_df = load_data()
+# Login page
+def show_login():
+    st.title("🔍 ClaimFinder")
+    st.header("Login")
+    
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Login")
+        
+        if submit:
+            # Demo login - accept any non-empty username/password
+            if username and password:
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                st.rerun()
+            else:
+                st.error("Please enter both username and password")
 
-# Title
-st.title("🔍 Fact Checking Dashboard")
-
-# User ID input in sidebar
-st.sidebar.header("User Information")
-user_id = st.sidebar.text_input("Enter User ID:", key="user_id")
-
-# Date filter in sidebar
-st.sidebar.header("Time Range Filter")
-time_filter = st.sidebar.radio(
-    "Select time range:",
-    ["All Time", "Last 24 Hours", "Last 7 Days", "Last 30 Days", "Last Year"],
-    key="time_filter"
-)
-
-# Calculate the date filter based on selection
-reference_date = datetime(2025, 4, 4, tzinfo=pytz.UTC)  # Set to April 4, 2025 in UTC
-if time_filter == "Last 24 Hours":
-    date_threshold = reference_date - timedelta(days=1)
-elif time_filter == "Last 7 Days":
-    date_threshold = reference_date - timedelta(days=7)
-elif time_filter == "Last 30 Days":
-    date_threshold = reference_date - timedelta(days=30)
-elif time_filter == "Last Year":
-    date_threshold = reference_date - timedelta(days=365)
-else:  # All Time
-    date_threshold = datetime.min.replace(tzinfo=pytz.UTC)
-
-# Apply date filter to posts
-filtered_posts_df = posts_df[posts_df['timestamp'] >= date_threshold]
-
-# Function to get existing user feedback
-def get_user_feedback(user_id):
-    if not user_id:
-        return [], []
-    response = supabase.table('user_feedback').select('*').eq('user_id', user_id).execute()
-    if response.data:
-        return response.data[0].get('posts_reviewed', []), response.data[0].get('clusters_helpful', [])
-    return [], []
-
-# Function to update user feedback
-def update_user_feedback(user_id, posts_reviewed=None, clusters_helpful=None):
-    if not user_id:
-        return
+# Main application
+def show_main_app():
+    # Title
+    st.title("🔍 ClaimFinder")
     
-    # Get existing feedback
-    current_posts, current_clusters = get_user_feedback(user_id)
+    # Load and parse data
+    parsed_data = parse_display_output("newRealData/display_output.csv")
     
-    # Update arrays with new values
-    if posts_reviewed is not None:
-        current_posts = list(set(current_posts + posts_reviewed))
-    if clusters_helpful is not None:
-        current_clusters = list(set(current_clusters + clusters_helpful))
+    # User info in sidebar
+    st.sidebar.header("User Information")
+    st.sidebar.text(f"Logged in as: {st.session_state.username}")
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in = False
+        st.session_state.username = None
+        st.rerun()
     
-    # Upsert the feedback
-    data = {
-        'user_id': user_id,
-        'posts_reviewed': current_posts,
-        'clusters_helpful': current_clusters
-    }
-    
-    supabase.table('user_feedback').upsert(data).execute()
-
-# Get existing feedback if user_id is provided
-reviewed_posts, helpful_clusters = get_user_feedback(user_id)
-
-# Create tabs
-tab1, tab2 = st.tabs(["Simple Fact Checking", "Cluster Based Fact Checking"])
-
-# Tab 1: Simple Fact Checking
-with tab1:
-    st.header("Social Media Posts")
-    
-    # Search functionality
-    search_term = st.text_input("Search posts by content:", key="simple_search")
-    
-    # Filter posts based on search
-    if search_term:
-        display_posts = filtered_posts_df[filtered_posts_df['text'].str.contains(search_term, case=False, na=False)]
-    else:
-        display_posts = filtered_posts_df
-    
-    # Add reviewed column and mark previously reviewed posts
-    display_posts = display_posts.copy()
-    display_posts['reviewed'] = display_posts['post_id'].astype(str).isin(reviewed_posts if reviewed_posts else [])
-    
-    # Configure grid for posts
-    gb = GridOptionsBuilder.from_dataframe(display_posts)
-    
-    # Configure selection
-    gb.configure_selection(selection_mode='multiple', use_checkbox=True)
-    
-    # Configure columns
-    gb.configure_column('reviewed', hide=True)
-    gb.configure_column('post_id', header_name='Post ID')
-    gb.configure_column('user_name', header_name='User')
-    gb.configure_column('date', header_name='Date')
-    gb.configure_column('text', header_name='Content')
-    gb.configure_column('favorites', header_name='Favorites')
-    gb.configure_column('retweets', header_name='Retweets')
-    gb.configure_default_column(resizable=True, filterable=True)
-    
-    js = JsCode("""
-    function(params) {
-        if (params.data.reviewed) {
-            return 'reviewed-row';
-        }
-        return '';
-    }
-    """)
-    
-    js_selectable = JsCode("""
-    function(params) {
-        return !params.data.reviewed;
-    }
-    """)
-    
-    # Add custom grid options
-    gb.configure_grid_options(
-        getRowClass=js,
-        isRowSelectable=js_selectable
+    # Date filter in sidebar
+    st.sidebar.header("Time Range Filter")
+    time_filter = st.sidebar.radio(
+        "Select time range:",
+        ["All Time", "Last 24 Hours", "Last 7 Days", "Last 30 Days", "Last Year"]
     )
     
-    css = {
-        ".reviewed-row": {
-            "background-color": "#808080 !important",
-            "pointer-events": "none",
-            "color": "white !important"
-        }
-    }
+    # Create tabs
+    tab1, tab2 = st.tabs(["All Posts", "AI-Sourced Posts"])
     
-    grid_options = gb.build()
+    # Tab 1: All Posts
+    with tab1:
+        st.header("Social Media Posts")
+        
+        # Search functionality
+        search_term = st.text_input("Search posts by content:", key="simple_search")
+        
+        # Prepare data for display
+        posts_data = []
+        for _, post in parsed_data:
+            post_url = f"https://twitter.com/anyuser/status/{post.post_id}"
+            posts_data.append({
+                'post_id': f'<a href="{post_url}" target="_blank">{post.post_id}</a>',
+                'date': post.user_created,
+                'content': post.text,
+                'retweets': post.retweets,
+                'favorites': post.favorites,
+                'user_name': post.user_name,
+                'user_created': post.user_created,
+                'followers': post.user_followers,
+                'friends': post.user_friends
+            })
+        
+        posts_df = pd.DataFrame(posts_data)
+        
+        # Filter based on search
+        if search_term:
+            posts_df = posts_df[posts_df['content'].str.contains(search_term, case=False, na=False)]
+        
+        # Configure grid
+        gb = GridOptionsBuilder.from_dataframe(posts_df)
+        gb.configure_column('post_id', header_name='Post ID', cellRenderer='html')
+        gb.configure_column('date', header_name='Date')
+        gb.configure_column('content', header_name='Content')
+        gb.configure_column('retweets', header_name='Retweets')
+        gb.configure_column('favorites', header_name='Favorites')
+        gb.configure_column('user_name', header_name='User Name')
+        gb.configure_column('user_created', header_name='Account Created')
+        gb.configure_column('followers', header_name='Followers')
+        gb.configure_column('friends', header_name='Following')
+        
+        gb.configure_default_column(resizable=True, filterable=True)
+        grid_options = gb.build()
+        
+        AgGrid(
+            posts_df,
+            gridOptions=grid_options,
+            height=600,
+            width='100%',
+            allow_unsafe_jscode=True
+        )
     
-    grid_response = AgGrid(
-        display_posts,
-        gridOptions=grid_options,
-        height=600,
-        width='100%',
-        custom_css=css,
-        data_return_mode='AS_INPUT',
-        update_mode='MODEL_CHANGED',
-        allow_unsafe_jscode=True
-    )
-    
-    # Submit button for reviews
-    if st.button("Submit Reviews", key="submit_reviews"):
-        selected_df = pd.DataFrame(grid_response['selected_rows'])
-        if not selected_df.empty:
-            selected_post_ids = selected_df['post_id'].astype(str).tolist()
-            if user_id:
-                update_user_feedback(user_id, posts_reviewed=selected_post_ids)
-                st.success(f"Submitted {len(selected_post_ids)} reviews for posts: {', '.join(selected_post_ids)}")
-            else:
-                st.warning("Please enter a User ID to submit feedback")
-        else:
-            st.warning("No posts selected for review")
+    # Tab 2: AI-Sourced Posts
+    with tab2:
+        st.header("AI-Analyzed Claims")
+        
+        # Filter for checkworthy claims and sort
+        ai_posts = [(pres, post) for pres, post in parsed_data if post.has_checkworthy_claims]
+        ai_posts.sort(key=lambda x: (
+            -1 if x[1].max_amplifiability == 'High' else 
+            -0.5 if x[1].max_amplifiability == 'Medium' else 0,
+            -1 if x[1].max_urgency == 'Very urgent' else 
+            -0.5 if x[1].max_urgency == 'Moderately urgent' else 0,
+            -x[1].priority_score
+        ))
+        
+        for presentation, post in ai_posts:
+            with st.expander(f"{presentation.title} (Priority: {post.priority_score:.2f})"):
+                # Create two columns for the layout
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    st.markdown("### Key Findings")
+                    for finding in presentation.key_findings.findings:
+                        st.markdown(f"**{finding.type}**")
+                        st.markdown(f"- {finding.description}")
+                    
+                    st.markdown("### Recommended Actions")
+                    for action in presentation.recommended_actions.recommendations:
+                        st.markdown(f"**Action:** {action.action}")
+                        st.markdown(f"*Rationale:* {action.rationale}")
+                
+                with col2:
+                    st.markdown("### Post Details")
+                    st.markdown(f"**Urgency:** {post.max_urgency}")
+                    st.markdown(f"**Amplifiability:** {post.max_amplifiability}")
+                    st.markdown(f"**Claims Found:** {post.num_claims}")
+                    st.markdown(f"**Engagement:**")
+                    st.markdown(f"- Retweets: {post.retweets}")
+                    st.markdown(f"- Favorites: {post.favorites}")
+                    
+                st.markdown("### Original Post")
+                st.markdown(f"*{post.text}*")
+                st.markdown(f"Posted by: **{post.user_name}**")
 
-# Tab 2: Cluster Based Fact Checking
-with tab2:
-    st.header("Fact Checking Clusters")
-    
-    # Get clustered claims data
-    claims_response = supabase.table('clustered_claims').select('*').execute()
-    claims_df = pd.DataFrame(claims_response.data)
-    
-    # Dictionary to store helpful states
-    helpful_states = {}
-    
-    # Update cluster metrics based on filtered data
-    for _, cluster in clusters_df.iterrows():
-        cluster_claims = claims_df[claims_df['assigned_cluster'] == cluster['cluster_name']]
-        cluster_posts = filtered_posts_df[filtered_posts_df['post_id'].isin(cluster_claims['post_id'])]
-        current_cluster_count = len(cluster_posts)
-        current_cluster_engagement = int(cluster_posts['favorites'].mean()) if not cluster_posts.empty else 0
-        
-        # Get priority level and format cluster name
-        priority_level = cluster['cluster_priority.level'] if pd.notna(cluster['cluster_priority.level']) else 'Unknown'
-        priority_color = {
-            'High': '🔴',
-            'Medium': '🟡',
-            'Low': '🟢',
-            'Unknown': '⚪'
-        }.get(priority_level, '⚪')
-        
-        with st.expander(f"{priority_color} {cluster['cluster_name'].replace('_', ' ').title()} (Priority: {priority_level})"):
-            # Add helpful checkbox at the top with pre-selected state
-            is_helpful = cluster['cluster_name'] in helpful_clusters if helpful_clusters else False
-            helpful_states[cluster['cluster_name']] = st.checkbox(
-                "Mark as Helpful",
-                value=is_helpful,
-                disabled=is_helpful,
-                key=f"helpful_{cluster['cluster_name']}"
-            )
-            
-            # Create two columns for the layout
-            col_left, col_right = st.columns([2, 1])
-            
-            with col_left:
-                # Summary Section
-                st.markdown("### Summary")
-                st.markdown(cluster['cluster_summary.summary'] if cluster['cluster_summary.summary'] else 'No summary available')
-                
-                # Key Findings Section
-                st.markdown("### Key Findings")
-                findings = cluster['key_findings.findings']['items'] if cluster['key_findings.findings'] else []
-                if findings:
-                    for finding in findings:
-                        st.markdown(f"**{finding.get('type', '')}**")
-                        st.markdown(f"- {finding.get('description', '')}")
-                else:
-                    st.markdown("No findings available")
-                
-                # Recommended Actions Section
-                st.markdown("### Recommended Actions")
-                actions = cluster['recommended_actions.recommendations']['items'] if cluster['recommended_actions.recommendations'] else []
-                if actions:
-                    for action in actions:
-                        st.markdown(f"**Action:** {action.get('action', '')}")
-                        st.markdown(f"*Rationale:* {action.get('rationale', '')}")
-                else:
-                    st.markdown("No actions available")
-            
-            with col_right:
-                # Metrics Section
-                st.markdown("### Metrics")
-                st.metric("Posts in Period", current_cluster_count)
-                st.metric("Avg. Engagement", f"{current_cluster_engagement:,}")
-                
-                # Similar Fact Checks Section
-                st.markdown("### Similar Fact Checks")
-                fact_checks = cluster['similar_fact_checks.fact_checks']['items'] if cluster['similar_fact_checks.fact_checks'] else []
-                if fact_checks:
-                    for check in fact_checks:
-                        confidence = check.get('match_confidence', 0) * 100  # Convert to percentage
-                        source = check.get('source', '')
-                        url = check.get('url', '')
-                        if source and url:
-                            st.markdown(f"**Source:** [{source}]({url})")
-                            st.markdown(f"*Confidence:* {confidence:.0f}%")
-                else:
-                    st.markdown("No fact checks available")
-            
-            # Related Content Section (outside the columns)
-            st.markdown("---")
-            st.markdown("### Related Content")
-            
-            # Create tabs for related content
-            posts_tab, claims_tab = st.tabs(["Related Posts", "Related Claims"])
-            
-            # Related Posts Tab
-            with posts_tab:
-                # Get claims for this cluster
-                cluster_claims = claims_df[claims_df['assigned_cluster'] == cluster['cluster_name']]
-                
-                # Get posts for these claims
-                cluster_posts = filtered_posts_df[filtered_posts_df['post_id'].isin(cluster_claims['post_id'])]
-                
-                if not cluster_posts.empty:
-                    # Display posts in a dataframe
-                    display_columns = ['post_id', 'user_name', 'date', 'text', 'favorites', 'retweets']
-                    st.dataframe(
-                        cluster_posts[display_columns],
-                        use_container_width=True,
-                        height=400
-                    )
-                else:
-                    st.markdown("No posts available for this cluster")
-            
-            # Related Claims Tab
-            with claims_tab:
-                # Get claims for this cluster
-                cluster_claims = claims_df[claims_df['assigned_cluster'] == cluster['cluster_name']]
-                
-                if not cluster_claims.empty:
-                    # Display claims in a dataframe
-                    display_columns = ['claim_id', 'post_id', 'claim', 'confidence', 'requires_additional_context']
-                    st.dataframe(
-                        cluster_claims[display_columns],
-                        use_container_width=True,
-                        height=400
-                    )
-                else:
-                    st.markdown("No claims available for this cluster")
-    
-    # Submit button for helpful states
-    if st.button("Submit Cluster Feedback", key="submit_helpful"):
-        helpful_clusters = [cluster_name for cluster_name, is_helpful in helpful_states.items() if is_helpful]
-        if helpful_clusters:
-            if user_id:
-                update_user_feedback(user_id, clusters_helpful=helpful_clusters)
-                st.success(f"Submitted feedback for {len(helpful_clusters)} clusters: {', '.join(helpful_clusters)}")
-            else:
-                st.warning("Please enter a User ID to submit feedback")
-        else:
-            st.warning("No clusters marked as helpful") 
+# Main flow
+if not st.session_state.logged_in:
+    show_login()
+else:
+    show_main_app() 
