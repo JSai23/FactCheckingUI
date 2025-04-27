@@ -6,6 +6,7 @@ from supabase import create_client
 import json
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from parsers import parse_display_output
+import re
 
 # Initialize Supabase client
 supabase_url = st.secrets["supabase_url"]
@@ -80,9 +81,21 @@ def show_main_app():
         # Prepare data for display
         posts_data = []
         for _, post in parsed_data:
-            post_url = f"https://twitter.com/anyuser/status/{post.post_id}"
+            raw_id = str(post.post_id)
+            # Strip common synthetic prefixes (e.g., original_ngt_, generated_gt_)
+            raw_id = re.sub(r"^(original_ngt_|generated_gt_)", "", raw_id)
+            # Extract numeric portion of the post ID (fallback to raw if no match)
+            match = re.search(r"\d{5,}", raw_id)  # long numeric chunk
+            clean_id = match.group(0) if match else raw_id
+
+            # Prefer user_handle, fallback to user_name, else 'anyuser'
+            handle = getattr(post, 'user_handle', None) or getattr(post, 'user_name', None) or 'anyuser'
+            # Remove spaces or invalid URL characters from handle
+            handle = re.sub(r"[^A-Za-z0-9_]+", "", str(handle))
+
+            url = f"https://x.com/{handle}/status/{clean_id}"
             posts_data.append({
-                'post_id': f'<a href="{post_url}" target="_blank">{post.post_id}</a>',
+                'post_url': url,
                 'date': post.user_created,
                 'content': post.text,
                 'retweets': post.retweets,
@@ -101,7 +114,7 @@ def show_main_app():
         
         # Configure grid
         gb = GridOptionsBuilder.from_dataframe(posts_df)
-        gb.configure_column('post_id', header_name='Post ID', cellRenderer='html')
+        gb.configure_column('post_url', header_name='Post URL')
         gb.configure_column('date', header_name='Date')
         gb.configure_column('content', header_name='Content')
         gb.configure_column('retweets', header_name='Retweets')
@@ -126,15 +139,9 @@ def show_main_app():
     with tab2:
         st.header("AI-Analyzed Claims")
         
-        # Filter for checkworthy claims and sort
-        ai_posts = [(pres, post) for pres, post in parsed_data if post.has_checkworthy_claims]
-        ai_posts.sort(key=lambda x: (
-            -1 if x[1].max_amplifiability == 'High' else 
-            -0.5 if x[1].max_amplifiability == 'Medium' else 0,
-            -1 if x[1].max_urgency == 'Very urgent' else 
-            -0.5 if x[1].max_urgency == 'Moderately urgent' else 0,
-            -x[1].priority_score
-        ))
+        # Show only posts with priority_score > 0.6 and sort by priority_score descending
+        ai_posts = [(pres, post) for pres, post in parsed_data if getattr(post, 'priority_score', 0) > 0.6]
+        ai_posts.sort(key=lambda x: -x[1].priority_score)
         
         for presentation, post in ai_posts:
             with st.expander(f"{presentation.title} (Priority: {post.priority_score:.2f})"):

@@ -73,6 +73,8 @@ class PresentationData:
 @dataclass
 class PostData:
     post_id: str
+    text: str
+    # Legacy alias (no default to keep dataclass field ordering constraints)
     post_text: str
     user_name: str
     user_handle: str
@@ -97,12 +99,14 @@ class PostData:
     top_claims: List[str]
     emotional_tone: str
     is_checkworthy: bool
+    has_checkworthy_claims: bool = False
     
     @classmethod
     def parse_from_dict(cls, data: Dict[str, Any]) -> 'PostData':
         # Initialize with default values
         default_data = {
             'post_id': '',
+            'text': '',
             'post_text': '',
             'user_name': '',
             'user_handle': '',
@@ -126,7 +130,8 @@ class PostData:
             'urgency_score': 0.0,
             'top_claims': [],
             'emotional_tone': '',
-            'is_checkworthy': False
+            'is_checkworthy': False,
+            'has_checkworthy_claims': False
         }
         
         # Update with provided data
@@ -177,6 +182,12 @@ class PostData:
                         default_data[key] = bool(value)
                 else:
                     default_data[key] = str(value) if value is not None else ''
+        
+        # Ensure legacy alias synchronisation
+        if default_data.get('post_text') and not default_data.get('text'):
+            default_data['text'] = default_data['post_text']
+        elif default_data.get('text') and not default_data.get('post_text'):
+            default_data['post_text'] = default_data['text']
         
         return cls(**default_data)
 
